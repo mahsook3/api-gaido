@@ -1,0 +1,9 @@
+# Core dependencies from app.py
+requests
+pypdf
+google-generativeai
+chromadb
+python-dotenv
+
+# Additional dependency for the Gradio UI
+gradio
