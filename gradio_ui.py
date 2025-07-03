@@ -224,7 +224,7 @@ def create_gradio_interface():
         # Header
         gr.HTML("""
         <div class="main-header">
-            <h1>APIGaido - Genesys API Documentation Assistant</h1>
+            <h1>GenieAPI - Genesys API Documentation Assistant</h1>
             <p>Ask questions about the Genesys API documentation and get detailed, formatted answers</p>
         </div>
         """)
