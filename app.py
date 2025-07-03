@@ -1,175 +1,255 @@
+import os
 import requests
 from pypdf import PdfReader
-import os
 import re
-import google.generativeai as genai
-from chromadb import Documents, EmbeddingFunction, Embeddings
-import chromadb
-from typing import List
 from dotenv import load_dotenv
 
-# Disable ChromaDB telemetry completely to avoid error messages
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-os.environ["CHROMA_SERVER_NOFILE"] = "1"
-os.environ["ALLOW_RESET"] = "TRUE"
-# Disable all ChromaDB logging and telemetry
-import logging
-logging.getLogger("chromadb").setLevel(logging.CRITICAL)
-logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain_core.prompts import PromptTemplate
 
-# Suppress warnings
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-# Load environment variables from .env file
+# -----------------------------
+# Load environment variables
+# -----------------------------
 load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Download the PDF from the specified URL and save it to the given path
-def download_pdf(url, save_path):
-    response = requests.get(url)
-    with open(save_path, 'wb') as f:
-        f.write(response.content)
-
-# URL and local path for the PDF document
-pdf_url = "https://all.docs.genesys.com/images/pdf/en-GWE-8.1.2-API-book.pdf"
-pdf_path = "en-GWE-8.1.2-API-book.pdf"
-download_pdf(pdf_url, pdf_path)
-
-# Load the PDF file and extract text from each page
-def load_pdf(file_path):
-    reader = PdfReader(file_path)
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text
-    return text
-
-pdf_text = load_pdf(pdf_path)
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
-    raise ValueError("Gemini API Key not provided or incorrect. Please provide a valid GEMINI_API_KEY.")
-try:
-    genai.configure(api_key=gemini_api_key)
-    print("API configured successfully with the provided key.")
-except Exception as e:
-    print("Failed to configure API:", str(e))
+    raise ValueError("Gemini API Key not found. Please set GEMINI_API_KEY in your .env file")
 
-# Split the text into chunks based on double newlines
-def split_text(text):
-    return [i for i in re.split('\n\n', text) if i.strip()]
-
-chunked_text = split_text(pdf_text)
-
-# Define a custom embedding function using Gemini API
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    def __init__(self):
-        """Initialize the Gemini embedding function."""
-        pass
+# -----------------------------
+# Download PDF
+# -----------------------------
+def download_pdf(url, save_path):
+    if os.path.exists(save_path):
+        print(f"PDF already exists at {save_path}")
+        return
     
-    def __call__(self, input: Documents) -> Embeddings:
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
-        genai.configure(api_key=gemini_api_key)
-        model = "models/embedding-001"
-        title = "Custom query"
-        return genai.embed_content(model=model, content=input, task_type="retrieval_document", title=title)["embedding"]
+    response = requests.get(url)
+    response.raise_for_status()
+    with open(save_path, "wb") as f:
+        f.write(response.content)
+    print(f"PDF downloaded to {save_path}")
 
-# Create directory for database if it doesn't exist
-db_folder = "chroma_db"
-if not os.path.exists(db_folder):
-    os.makedirs(db_folder)
+pdf_url = "https://all.docs.genesys.com/images/pdf/en-GWE-8.1.2-API-book.pdf"
+pdf_path = "en-GWE-8.1.2-API-book.pdf"
 
-# Create a Chroma database with the given documents
-def create_chroma_db(documents: List[str], path: str, name: str):
-    # Suppress stdout/stderr to hide telemetry errors
-    import sys
-    from contextlib import redirect_stderr, redirect_stdout
-    from io import StringIO
+download_pdf(pdf_url, pdf_path)
+
+# -----------------------------
+# Load and extract PDF text with better preprocessing
+# -----------------------------
+def load_pdf_text(file_path):
+    reader = PdfReader(file_path)
+    text = ""
+    for page_num, page in enumerate(reader.pages):
+        try:
+            page_text = page.extract_text()
+            if page_text:
+                # Clean up the text
+                page_text = re.sub(r'\s+', ' ', page_text)  # Replace multiple spaces with single space
+                page_text = re.sub(r'\n+', '\n', page_text)  # Replace multiple newlines with single newline
+                text += f"Page {page_num + 1}: {page_text}\n\n"
+        except Exception as e:
+            print(f"Error extracting text from page {page_num + 1}: {e}")
+    return text
+
+pdf_text = load_pdf_text(pdf_path)
+print(f"Extracted text length: {len(pdf_text)} characters")
+
+# -----------------------------
+# Split text into chunks with better parameters
+# -----------------------------
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1500,  # Increased chunk size for better context
+    chunk_overlap=200,  # Increased overlap for better continuity
+    separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""],
+    length_function=len,
+)
+
+chunks = text_splitter.split_text(pdf_text)
+print(f"Number of text chunks: {len(chunks)}")
+
+# Filter out very short chunks that might not be useful
+chunks = [chunk for chunk in chunks if len(chunk.strip()) > 100]
+print(f"Number of chunks after filtering: {len(chunks)}")
+
+# -----------------------------
+# Create Gemini embedding model
+# -----------------------------
+embedding_model = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    google_api_key=gemini_api_key
+)
+
+# -----------------------------
+# Create Chroma vectorstore with better configuration
+# -----------------------------
+persist_dir = "chroma_db"
+
+# Check if vectorstore already exists
+if os.path.exists(persist_dir):
+    print("Loading existing vectorstore...")
+    vectorstore = Chroma(
+        persist_directory=persist_dir,
+        embedding_function=embedding_model
+    )
+else:
+    print("Creating new vectorstore...")
+    vectorstore = Chroma.from_texts(
+        texts=chunks,
+        embedding=embedding_model,
+        persist_directory=persist_dir,
+        metadatas=[{"chunk_id": i} for i in range(len(chunks))]
+    )
+
+print("Vectorstore ready.")
+
+# -----------------------------
+# Define Gemini chat model with better configuration
+# -----------------------------
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    google_api_key=gemini_api_key,
+    temperature=0.1,  # Lower temperature for more focused responses
+    max_output_tokens=1000
+)
+
+# -----------------------------
+# Define improved RAG prompt
+# -----------------------------
+template = """You are an expert assistant helping users understand technical documentation. 
+Use the provided context to answer the question accurately and comprehensively.
+
+Instructions:
+1. Base your answer primarily on the provided context
+2. If the context doesn't contain enough information, clearly state what information is missing
+3. Provide specific details and examples when available
+4. Use clear, professional language
+5. If the question is about a specific feature or process, explain it step by step
+6. you are also capable of providing code examples if relevant based on the context
+7. Provide the response only in Markdown format, without any additional text or formatting
+8. Reponse in MD code
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+prompt = PromptTemplate(
+    template=template,
+    input_variables=["context", "question"]
+)
+
+# -----------------------------
+# Create RAG chain with better retrieval
+# -----------------------------
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 5}  # Retrieve more relevant chunks
+    ),
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": prompt},
+    return_source_documents=True
+)
+
+# -----------------------------
+# Enhanced query processing
+# -----------------------------
+def preprocess_query(query):
+    """Preprocess the query to improve retrieval"""
+    # Remove extra whitespace
+    query = re.sub(r'\s+', ' ', query.strip())
+    return query
+
+def post_process_answer(answer):
+    """Post-process the answer to improve readability"""
+    # Remove extra whitespace
+    answer = re.sub(r'\s+', ' ', answer.strip())
+    return answer
+
+# -----------------------------
+# Interactive loop with better error handling
+# -----------------------------
+def interactive_loop():
+    print("\n" + "="*50)
+    print("Welcome to the Genesys API Documentation Assistant!")
+    print("Ask questions about the API documentation.")
+    print("Type 'quit' to exit, 'help' for tips.")
+    print("="*50)
     
-    try:
-        chroma_client = chromadb.PersistentClient(path=path)
-        # Try to get existing collection first
-        with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
-            db = chroma_client.get_collection(name=name, embedding_function=GeminiEmbeddingFunction())
-        print(f"Loaded existing collection '{name}' with {db.count()} documents.")
-        return db, name
-    except:
-        # Create new collection if it doesn't exist
-        with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
-            db = chroma_client.create_collection(name=name, embedding_function=GeminiEmbeddingFunction())
-        print(f"Created new collection '{name}'. Adding {len(documents)} documents...")
-        for i, d in enumerate(documents):
-            with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
-                db.add(documents=[d], ids=[str(i)])
-        print(f"Added {len(documents)} documents to the collection.")
-        return db, name
-
-# Specify the path and collection name for Chroma database
-db_name = "rag_experiment"
-db_path = os.path.join(os.getcwd(), db_folder)
-db, db_name = create_chroma_db(chunked_text, db_path, db_name)
-
-# Retrieve the most relevant passages based on the query
-def get_relevant_passage(query: str, db, n_results: int):
-    # Suppress stdout/stderr to hide telemetry errors
-    from contextlib import redirect_stderr, redirect_stdout
-    from io import StringIO
-    
-    with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
-        results = db.query(query_texts=[query], n_results=n_results)
-    return [doc[0] for doc in results['documents']]
-
-query = "What is the AI Maturity Scale?"
-relevant_text = get_relevant_passage(query, db, n_results=1)
-
-# Construct a prompt for the generation model based on the query and retrieved data
-def make_rag_prompt(query: str, relevant_passage: str):
-    escaped_passage = relevant_passage.replace("'", "").replace('"', "").replace("\n", " ")
-    prompt = f"""You are a helpful and informative bot that answers questions using text from the reference passage included below.
-Be sure to respond in a complete sentence, being comprehensive, including all relevant background information.
-However, you are talking to a non-technical audience, so be sure to break down complicated concepts and
-strike a friendly and conversational tone.
-QUESTION: '{query}'
-PASSAGE: '{escaped_passage}'
-
-ANSWER:
-"""
-    return prompt
-
-# Generate an answer using the Gemini Pro API
-def generate_answer(prompt: str):
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        raise ValueError("Gemini API Key not provided. Please provide GEMINI_API_KEY as an environment variable")
-    genai.configure(api_key=gemini_api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    result = model.generate_content(prompt)
-    return result.text
-
-# Construct the prompt and generate the answer
-final_prompt = make_rag_prompt(query, "".join(relevant_text))
-answer = generate_answer(final_prompt)
-print(answer)
-
-# Interactive function to process user input and generate an answer
-def process_query_and_generate_answer():
     while True:
-        query = input("\nPlease enter your query (or 'quit' to exit): ")
-        if not query or query.lower() == 'quit':
-            print("Goodbye!")
-            break
-        relevant_text = get_relevant_passage(query, db, n_results=1)
-        if not relevant_text:
-            print("No relevant information found for the given query.")
-            continue
-        final_prompt = make_rag_prompt(query, "".join(relevant_text))
-        answer = generate_answer(final_prompt)
-        print("\nGenerated Answer:", answer)
+        try:
+            user_input = input("\nEnter your question: ").strip()
+            
+            if user_input.lower() == "quit":
+                print("Goodbye!")
+                break
+            elif user_input.lower() == "help":
+                print("\nTips for better results:")
+                print("- Ask specific questions about API features")
+                print("- Use clear, descriptive language")
+                print("- Ask about specific functions, endpoints, or processes")
+                print("- Example: 'How do I authenticate with the API?'")
+                continue
+            elif not user_input:
+                print("Please enter a question.")
+                continue
 
-# Main execution
+            # Preprocess the query
+            processed_query = preprocess_query(user_input)
+            
+            # Get the answer
+            result = qa_chain.invoke(processed_query)
+            
+            # Post-process and display the answer
+            answer = post_process_answer(result["result"])
+            
+            print("\n" + "="*20 + " ANSWER " + "="*20)
+            print(answer)
+            
+            # Optional: Show source information
+            if result.get("source_documents"):
+                print(f"\n[Based on {len(result['source_documents'])} relevant sections from the documentation]")
+                
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            print("Please try again with a different question.")
+
+# -----------------------------
+# Test function to verify the system
+# -----------------------------
+def test_system():
+    """Test the RAG system with sample queries"""
+    test_queries = [
+        "What is this document about?",
+        "What are the main API features?",
+        "How do I authenticate?",
+        "What endpoints are available?"
+    ]
+    
+    print("\n" + "="*30)
+    print("Testing the RAG system...")
+    print("="*30)
+    
+    for query in test_queries:
+        print(f"\nTest Query: {query}")
+        try:
+            result = qa_chain.invoke(query)
+            print(f"Answer: {result['result'][:200]}...")
+        except Exception as e:
+            print(f"Error: {e}")
+
 if __name__ == "__main__":
-    # Invoke the function to interact with user
-    process_query_and_generate_answer()
+    # Uncomment the line below to run tests first
+    # test_system()
+    
+    interactive_loop()
