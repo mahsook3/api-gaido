@@ -219,7 +219,7 @@ def create_gradio_interface():
     }
     """
     
-    with gr.Blocks(css=custom_css, title="Genesys API Documentation Assistant") as demo:
+    with gr.Blocks(css=custom_css, title="GenieAPI") as demo:
         
         # Header
         gr.HTML("""
@@ -248,23 +248,7 @@ def create_gradio_interface():
                     
                 # Submit button
                 submit_btn = gr.Button("🔍 Get Answer", variant="primary", size="lg")
-                
-                # Sample questions
-                gr.HTML("""
-                <div class="sample-questions">
-                    <h3>💡 Sample Questions</h3>
-                    <p>Click on any question below to try it out:</p>
-                </div>
-                """)
-                
-                # Create sample question buttons
-                for i, question in enumerate(sample_questions):
-                    sample_btn = gr.Button(f"📝 {question}", size="sm")
-                    sample_btn.click(
-                        fn=load_sample_question,
-                        inputs=[gr.State(question)],
-                        outputs=[question_input]
-                    )
+            
             
             with gr.Column(scale=3):
                 # Answer output using HTML instead of Markdown
@@ -279,19 +263,7 @@ def create_gradio_interface():
                     visible=False
                 )
         
-        # Usage instructions
-        gr.HTML("""
-        <div style="margin-top: 2rem; padding: 1rem; background: #e8f4f8; border-radius: 8px;">
-            <h3>📖 How to Use</h3>
-            <ul>
-                <li><strong>Ask specific questions</strong> about API features, endpoints, authentication, etc.</li>
-                <li><strong>Use clear, descriptive language</strong> for better results</li>
-                <li><strong>Enable "Show source information"</strong> to see which parts of the documentation were used</li>
-                <li><strong>Try the sample questions</strong> to get familiar with the system</li>
-            </ul>
-        </div>
-        """)
-        
+
         # Event handlers
         submit_btn.click(
             fn=query_documents,
